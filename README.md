@@ -18,38 +18,52 @@ or
 ## Usage
 
 ```javascript
-var mmh3 = require('murmurhash3');
-    
-mmh3.murmur32('key', function(err, hashValue){
+import { murmur32, murmur128Hex } from 'murmurhash3';
+
+murmur32('key', (err, hashValue) => {
   if (err) throw err;
-  ...
+  // ...
 });
-mmh3.murmur128Hex('key', function(err, hashValue){
+
+murmur128Hex('key', (err, hashValue) => {
   if (err) throw err;
-  ...
+  // ...
 });
+```
+
+You can also wrap the async functions with `util.promisify` for `async`/`await`:
+
+```javascript
+import { promisify } from 'node:util';
+import { murmur32, murmur128Hex } from 'murmurhash3';
+
+const murmur32Async = promisify(murmur32);
+const murmur128HexAsync = promisify(murmur128Hex);
+
+const hash32 = await murmur32Async('key');
+const hash128 = await murmur128HexAsync('key');
 ```
 
 ## Functions
 
 ### Async interfaces
 
-    murmur32(key [,seed], callback);    // return 32bit integer value
-    murmur32Hex(key [,seed], callback); // return 32bit hexadecimal string
-    murmur128(key [,seed], callback);   // return array that have 4 elements of 32bit integer
-    murmur128Hex(key [,seed], callback);// return 128bit hexadecimal string
+    murmur32(key [, seed], callback);     // returns 32bit integer value
+    murmur32Hex(key [, seed], callback);  // returns 32bit hexadecimal string
+    murmur128(key [, seed], callback);    // returns array of 4 32bit integers
+    murmur128Hex(key [, seed], callback); // returns 128bit hexadecimal string
 
-- `seed` is optional argument. (unsigned integer)
-- The callback gets two arguments `(error, hashValue)`. 
+- `seed` is an optional argument. (unsigned integer)
+- The callback receives two arguments `(error, hashValue)`.
 
 ### Sync interfaces
 
-    murmur32Sync(key [,seed]);    // return 32bit integer value
-    murmur32HexSync(key, [,seed]); // return 32bit hexadecimal string
-    murmur128Sync(key [,seed]);   // return array that have 4 elements of 32bit integer
-    murmur128HexSync(key [,seed]);// return 128bit hexadecimal string
+    murmur32Sync(key [, seed]);    // returns 32bit integer value
+    murmur32HexSync(key [, seed]); // returns 32bit hexadecimal string
+    murmur128Sync(key [, seed]);   // returns array of 4 32bit integers
+    murmur128HexSync(key [, seed]);// returns 128bit hexadecimal string
 
-- `seed` is optional argument. (unsigned integer)
+- `seed` is an optional argument. (unsigned integer)
 
 ## Requirement
 
