@@ -3,277 +3,216 @@
  * Copyright(c) 2013 Hideaki Ohno <hide.o.j55{at}gmail.com>
  * MIT Licensed
  */
-#ifndef BUILDING_NODE_EXTENSION
-#define BUILDING_NODE_EXTENSION
-#endif
-#include <nan.h>
-#include <iostream>
+#include <napi.h>
 #include <sstream>
 #include <iomanip>
-#include <memory>
 #include "MurmurHash3.h"
 
-// validate the arguments count and type
-#define REQ_ARG_COUNT_AND_TYPE(I, TYPE) \
-  if (info.Length() < (I + 1) ) { \
-      std::stringstream __ss; \
-      __ss << "A least " << I + 1 << " arguments are required"; \
-      return Nan::ThrowRangeError(__ss.str().c_str()); \
-  } else if (!info[I]->Is##TYPE()) { \
-      std::stringstream __ss; \
-      __ss << "Argument " << I + 1 << " must be a " #TYPE; \
-      return Nan::ThrowTypeError(__ss.str().c_str()); \
-  }
+/**
+ * @brief Validate argument count and type, throwing on failure.
+ * @param info CallbackInfo
+ * @param index Argument index
+ * @param typeName Name of expected type (for error message)
+ * @param checker Lambda that returns true if argument is valid
+ */
+static void ValidateArg(const Napi::CallbackInfo& info, size_t index,
+                         const char* typeName,
+                         bool (*checker)(const Napi::Value&)) {
+    Napi::Env env = info.Env();
+    if (info.Length() < index + 1) {
+        std::stringstream ss;
+        ss << "A least " << index + 1 << " arguments are required";
+        throw Napi::RangeError::New(env, ss.str());
+    }
+    if (!checker(info[index])) {
+        std::stringstream ss;
+        ss << "Argument " << index + 1 << " must be a " << typeName;
+        throw Napi::TypeError::New(env, ss.str());
+    }
+}
 
-// validate the argument type is 'function' or not.
-#define REQ_FUN_ARG(I, VAR) \
-  REQ_ARG_COUNT_AND_TYPE(I, Function) \
-  Local<Function> VAR = Local<Function>::Cast(info[I]);
+static bool IsString(const Napi::Value& v) { return v.IsString(); }
+static bool IsBoolean(const Napi::Value& v) { return v.IsBoolean(); }
+static bool IsFunction(const Napi::Value& v) { return v.IsFunction(); }
 
-// validate the argument type is 'string' or not.
-#define REQ_STR_ARG(I) REQ_ARG_COUNT_AND_TYPE(I, String)
-
-// validate the argument type is 'boolean' or not.
-#define REQ_BOOL_ARG(I) REQ_ARG_COUNT_AND_TYPE(I, Boolean)
-
-// validate the argument type is 'unsigned int' or not.
-#define REQ_UINT32_ARG(I) REQ_ARG_COUNT_AND_TYPE(I, Uint32)
-
-#define isolate v8::Isolate::GetCurrent()
-
-#if NODE_VERSION_AT_LEAST(12, 0, 0)
-#define TO_UTF8VALUE(str) *String::Utf8Value(isolate, str);
-#define ToBoolean(bool) bool->BooleanValue(isolate);
-#elif NODE_VERSION_AT_LEAST(9, 0, 0)
-#define TO_UTF8VALUE(str) *String::Utf8Value(isolate, str);
-#define ToBoolean(bool) bool->BooleanValue();
-#else
-#define TO_UTF8VALUE(str) *String::Utf8Value(str);
-#define ToBoolean(bool) bool->BooleanValue();
-#endif
-
-using namespace v8;
-using namespace node;
+/**
+ * @brief Check if value is a valid Uint32 (number, non-negative, integer, <= UINT32_MAX)
+ */
+static bool IsUint32(const Napi::Value& v) {
+    if (!v.IsNumber()) return false;
+    double d = v.As<Napi::Number>().DoubleValue();
+    return d >= 0 && d <= 4294967295.0 && d == (double)(uint32_t)d;
+}
 
 /**
  * @brief Make return value of murmur32
- * @param ret[out] Return value
- * @param hashValue[in] hash value
- * @param hexMode[in] hexadecimal string mode flag
  */
-static NAN_INLINE void MakeReturnValue_murmur32(Local<Value>& ret, uint32_t hashValue, bool hexMode) {
+static Napi::Value MakeReturnValue_murmur32(Napi::Env env, uint32_t hashValue, bool hexMode) {
     if (hexMode) {
         std::stringstream ss;
         ss << std::hex << std::setfill('0') << std::setw(8) << hashValue;
-        ret = Nan::New<String>(ss.str().c_str()).ToLocalChecked();;
+        return Napi::String::New(env, ss.str());
     } else {
-        ret = Nan::New<Uint32>(hashValue);
+        return Napi::Number::New(env, hashValue);
     }
 }
 
 /**
  * @brief Make return value of murmur128
- * @param ret[out] Return value
- * @param hashValue[in] hash value
- * @param hexMode[in] hexadecimal string mode flag
  */
-static NAN_INLINE void MakeReturnValue_murmur128(Local<Value>& ret, uint32_t* hashValue, bool hexMode) {
+static Napi::Value MakeReturnValue_murmur128(Napi::Env env, uint32_t* hashValue, bool hexMode) {
     if (hexMode) {
         std::stringstream ss;
         ss << std::hex << std::setfill('0');
         for (int i = 0; i < 4; i++) {
             ss << std::setw(8) << hashValue[i];
         }
-        ret = Nan::New<String>(ss.str().c_str()).ToLocalChecked();;
+        return Napi::String::New(env, ss.str());
     } else {
-        Local<Context> context = isolate->GetCurrentContext();
-        Local<Array> values = Nan::New<Array>(4);
+        Napi::Array values = Napi::Array::New(env, 4);
         for (int i = 0; i < 4; i++) {
-            values->Set(context, Nan::New<Integer>(i), Nan::New<Uint32>(hashValue[i]));
+            values.Set((uint32_t)i, Napi::Number::New(env, hashValue[i]));
         }
-        ret = values;
+        return values;
     }
 }
 
 /**
- * @brief UV queue worker for murmur32
+ * @brief Async worker for murmur32
  */
-class Murmur32Worker : public Nan::AsyncWorker {
+class Murmur32Worker : public Napi::AsyncWorker {
 public:
-    /**
-     * @brief Constructor
-     * @param callback[in] Callback functio object
-     * @param key[in] hash key
-     * @param seed[in] hash seed
-     * @param hexMode[in] hexadecimal string mode flag
-     */
-    Murmur32Worker(Nan::Callback *callback, std::string& key, uint32_t seed, bool hexMode)
-        : Nan::AsyncWorker(callback), key_(key), seed_(seed), hexMode_(hexMode) {
+    Murmur32Worker(Napi::Function& callback, std::string key, uint32_t seed, bool hexMode)
+        : Napi::AsyncWorker(callback), key_(key), seed_(seed), hexMode_(hexMode), hashValue_(0) {
     }
 
-    /**
-     * @brief Calculate MurmurHash3(32bit)
-     */
-    void Execute() {
+    void Execute() override {
         MurmurHash3_x86_32(key_.c_str(), (int) key_.length(), seed_, &hashValue_);
     }
 
-    /**
-     * @brief Invoke callback function
-     */
-    void HandleOKCallback() {
-        Nan::HandleScope scope;
-        Local<Value> res[2];
-        res[0] = Nan::Null();
-        MakeReturnValue_murmur32(res[1], hashValue_, hexMode_);
-        callback->Call(2, res, async_resource);
+    void OnOK() override {
+        Napi::Env env = Env();
+        Callback().Call({env.Null(), MakeReturnValue_murmur32(env, hashValue_, hexMode_)});
     }
 
 private:
-    std::string key_;   /// hash key
-    uint32_t seed_;     /// hash seed
-    uint32_t hashValue_;/// hash value
-    bool hexMode_;      /// hexadecimal string mode flag
+    std::string key_;
+    uint32_t seed_;
+    bool hexMode_;
+    uint32_t hashValue_;
 };
 
 /**
- * @brief UV queue worker for murmur128
+ * @brief Async worker for murmur128
  */
-class Murmur128Worker : public Nan::AsyncWorker {
+class Murmur128Worker : public Napi::AsyncWorker {
 public:
-    /**
-     * @brief Constructor
-     * @param callback[in] Callback functio object
-     * @param key[in] hash key
-     * @param seed[in] hash seed
-     * @param hexMode[in] hexadecimal string mode flag
-     */
-    Murmur128Worker(Nan::Callback *callback, std::string& key, uint32_t seed, bool hexMode)
-        : Nan::AsyncWorker(callback), key_(key), seed_(seed), hexMode_(hexMode) {
+    Murmur128Worker(Napi::Function& callback, std::string key, uint32_t seed, bool hexMode)
+        : Napi::AsyncWorker(callback), key_(key), seed_(seed), hexMode_(hexMode) {
+        memset(hashValue_, 0, sizeof(hashValue_));
     }
 
-    /**
-     * @brief Calculate MurmurHash3(128bit)
-     */
-    void Execute() {
+    void Execute() override {
         MurmurHash3_x86_128(key_.c_str(), (int) key_.length(), seed_, &hashValue_);
     }
 
-    /**
-     * @brief Invoke callback function
-     */
-    void HandleOKCallback() {
-        Nan::HandleScope scope;
-        Local<Value> res[2];
-        res[0] = Nan::Null();
-        MakeReturnValue_murmur128(res[1], hashValue_, hexMode_);
-        callback->Call(2, res, async_resource);
+    void OnOK() override {
+        Napi::Env env = Env();
+        Callback().Call({env.Null(), MakeReturnValue_murmur128(env, hashValue_, hexMode_)});
     }
 
 private:
-    std::string key_;       /// hash key
-    uint32_t seed_;         /// hash seed
-    uint32_t hashValue_[4]; /// hash value
-    bool hexMode_;          /// hexadecimal string mode flag
+    std::string key_;
+    uint32_t seed_;
+    bool hexMode_;
+    uint32_t hashValue_[4];
 };
 
 /**
  * @brief Calculate MurmurHash3(32bit) with async interface
  */
-NAN_METHOD(murmur32_async) {
-    Nan::HandleScope scope;
+Napi::Value murmur32_async(const Napi::CallbackInfo& info) {
+    ValidateArg(info, 0, "String", IsString);
+    ValidateArg(info, 1, "Uint32", IsUint32);
+    ValidateArg(info, 2, "Boolean", IsBoolean);
+    ValidateArg(info, 3, "Function", IsFunction);
 
-    REQ_STR_ARG(0);
-    REQ_UINT32_ARG(1);
-    REQ_BOOL_ARG(2);
-    REQ_FUN_ARG(3, cb);
+    std::string key = info[0].As<Napi::String>().Utf8Value();
+    uint32_t seed = info[1].As<Napi::Number>().Uint32Value();
+    bool hexMode = info[2].As<Napi::Boolean>().Value();
+    Napi::Function cb = info[3].As<Napi::Function>();
 
-    std::string key = TO_UTF8VALUE(info[0]);
-    uint32_t seed = Nan::To<uint32_t>(info[1]).FromJust();
+    Murmur32Worker* worker = new Murmur32Worker(cb, key, seed, hexMode);
+    worker->Queue();
 
-    Nan::Callback *callback = new Nan::Callback(cb);
-    bool hexMode = ToBoolean(info[2]);
-    Nan::AsyncQueueWorker(new Murmur32Worker(callback, key, seed, hexMode));
-
-    info.GetReturnValue().Set(Nan::Undefined());
+    return info.Env().Undefined();
 }
 
 /**
  * @brief Calculate MurmurHash3(128bit) with async interface
  */
-NAN_METHOD(murmur128_async) {
-    Nan::HandleScope scope;
+Napi::Value murmur128_async(const Napi::CallbackInfo& info) {
+    ValidateArg(info, 0, "String", IsString);
+    ValidateArg(info, 1, "Uint32", IsUint32);
+    ValidateArg(info, 2, "Boolean", IsBoolean);
+    ValidateArg(info, 3, "Function", IsFunction);
 
-    REQ_STR_ARG(0);
-    REQ_UINT32_ARG(1);
-    REQ_BOOL_ARG(2);
-    REQ_FUN_ARG(3, cb);
+    std::string key = info[0].As<Napi::String>().Utf8Value();
+    uint32_t seed = info[1].As<Napi::Number>().Uint32Value();
+    bool hexMode = info[2].As<Napi::Boolean>().Value();
+    Napi::Function cb = info[3].As<Napi::Function>();
 
-    std::string key = TO_UTF8VALUE(info[0]);
-    uint32_t seed = Nan::To<uint32_t>(info[1]).FromJust();
+    Murmur128Worker* worker = new Murmur128Worker(cb, key, seed, hexMode);
+    worker->Queue();
 
-    Nan::Callback *callback = new Nan::Callback(cb);
-    bool hexMode = ToBoolean(info[2]);
-    Nan::AsyncQueueWorker(new Murmur128Worker(callback, key, seed, hexMode));
-
-    info.GetReturnValue().Set(Nan::Undefined());
+    return info.Env().Undefined();
 }
 
 /**
  * @brief Calculate MurmurHash3(32bit) with sync interface
  */
-NAN_METHOD(murmur32_sync) {
-    Nan::HandleScope scope;
+Napi::Value murmur32_sync(const Napi::CallbackInfo& info) {
+    ValidateArg(info, 0, "String", IsString);
+    ValidateArg(info, 1, "Uint32", IsUint32);
+    ValidateArg(info, 2, "Boolean", IsBoolean);
+
+    std::string key = info[0].As<Napi::String>().Utf8Value();
+    uint32_t seed = info[1].As<Napi::Number>().Uint32Value();
+    bool hexMode = info[2].As<Napi::Boolean>().Value();
+
     uint32_t out;
-
-    REQ_STR_ARG(0);
-    REQ_UINT32_ARG(1);
-    REQ_BOOL_ARG(2);
-
-    std::string key = TO_UTF8VALUE(info[0]);
-    uint32_t seed = Nan::To<uint32_t>(info[1]).FromJust();
-    bool hexMode =  ToBoolean(info[2]);
-
     MurmurHash3_x86_32(key.c_str(), (int) key.length(), seed, &out);
 
-    Local<Value> ret;
-    MakeReturnValue_murmur32(ret, out, hexMode);
-    info.GetReturnValue().Set(ret);
-
+    return MakeReturnValue_murmur32(info.Env(), out, hexMode);
 }
 
 /**
  * @brief Calculate MurmurHash3(128bit) with sync interface
  */
-NAN_METHOD(murmur128_sync) {
-    Nan::HandleScope scope;
+Napi::Value murmur128_sync(const Napi::CallbackInfo& info) {
+    ValidateArg(info, 0, "String", IsString);
+    ValidateArg(info, 1, "Uint32", IsUint32);
+    ValidateArg(info, 2, "Boolean", IsBoolean);
+
+    std::string key = info[0].As<Napi::String>().Utf8Value();
+    uint32_t seed = info[1].As<Napi::Number>().Uint32Value();
+    bool hexMode = info[2].As<Napi::Boolean>().Value();
+
     uint32_t out[4];
-
-    REQ_STR_ARG(0);
-    REQ_UINT32_ARG(1);
-    REQ_BOOL_ARG(2);
-
-    std::string key = TO_UTF8VALUE(info[0]);
-    uint32_t seed = Nan::To<uint32_t>(info[1]).FromJust();
-    bool hexMode =  ToBoolean(info[2]);
-
     MurmurHash3_x86_128(key.c_str(), (int) key.length(), seed, &out);
 
-    Local<Value> ret;
-    MakeReturnValue_murmur128(ret, out, hexMode);
-    info.GetReturnValue().Set(ret);
+    return MakeReturnValue_murmur128(info.Env(), out, hexMode);
 }
 
 /**
- * @brief Initialize
- * @param exports[in,out] exports object
+ * @brief Initialize module
  */
+Napi::Object Init(Napi::Env env, Napi::Object exports) {
+    exports.Set("murmur32", Napi::Function::New(env, murmur32_async));
+    exports.Set("murmur128", Napi::Function::New(env, murmur128_async));
+    exports.Set("murmur32Sync", Napi::Function::New(env, murmur32_sync));
+    exports.Set("murmur128Sync", Napi::Function::New(env, murmur128_sync));
+    return exports;
+}
 
-NAN_MODULE_INIT(init) {
-    Nan::Export(target, "murmur32", murmur32_async);
-    Nan::Export(target, "murmur128", murmur128_async);
-    Nan::Export(target, "murmur32Sync", murmur32_sync);
-    Nan::Export(target, "murmur128Sync", murmur128_sync);
-};
-
-NODE_MODULE(murmurhash3, init)
+NODE_API_MODULE(murmurhash3, Init)

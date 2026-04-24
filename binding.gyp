@@ -8,8 +8,9 @@
       'cflags!': ['-fno-exceptions'],
       'cflags_cc!': ['-fno-exception'],
       "include_dirs" : [
-          "<!(node -e \"require('nan')\")"
+          "<!@(node -p \"require('node-addon-api').include\")"
       ],
+      'defines': [ 'NAPI_CPP_EXCEPTIONS' ],
       'conditions': [
         ['OS=="win"', {
             'msvs_settings': {
