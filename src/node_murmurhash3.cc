@@ -21,7 +21,7 @@ static void ValidateArg(const Napi::CallbackInfo& info, size_t index,
     Napi::Env env = info.Env();
     if (info.Length() < index + 1) {
         std::stringstream ss;
-        ss << "A least " << index + 1 << " arguments are required";
+        ss << "At least " << index + 1 << " arguments are required";
         throw Napi::RangeError::New(env, ss.str());
     }
     if (!checker(info[index])) {
